@@ -57,11 +57,9 @@ class EKF_SLAM:
         lm_x = self.xEst[0, 0] + dist * math.cos(theta + angle)
         lm_y = self.xEst[1, 0] + dist * math.sin(theta + angle)
 
-        # Rozszerzenie wektora stanu
         self.xEst = np.vstack((self.xEst, [[lm_x], [lm_y]]))
         self.lm_dict[lm_id] = len(self.xEst) - 2
 
-        # Jakobiany inicjalizacji
         G_r = np.array([
             [1.0, 0.0, -dist * math.sin(theta + angle)],
             [0.0, 1.0,  dist * math.cos(theta + angle)]
@@ -71,7 +69,6 @@ class EKF_SLAM:
             [math.sin(theta + angle),  dist * math.cos(theta + angle)]
         ])
 
-        # Rozszerzanie Macierzy Kowariancji P
         P_rr = self.PEst[0:3, 0:3]
         P_rm = self.PEst[0:3, 3:]
         P_ll = G_r @ P_rr @ G_r.T + G_z @ self.R @ G_z.T
@@ -91,7 +88,6 @@ class EKF_SLAM:
         """Korekcja stanu na podstawie znanego landmarku."""
         idx = self.lm_dict[lm_id]
 
-        # Oczekiwany pomiar
         dx = self.xEst[idx, 0] - self.xEst[0, 0]
         dy = self.xEst[idx+1, 0] - self.xEst[1, 0]
         q = dx**2 + dy**2
@@ -101,18 +97,15 @@ class EKF_SLAM:
         z_pred_angle = math.atan2(dy, dx) - self.xEst[2, 0]
         z_pred_angle = (z_pred_angle + math.pi) % (2 * math.pi) - math.pi
 
-        # Jakobian H rozciągnięty na cały stan
         H = np.zeros((2, len(self.xEst)))
         H[0, 0:3] = [-dx/sq, -dy/sq, 0.0]
         H[1, 0:3] = [dy/q, -dx/q, -1.0]
         H[0, idx:idx+2] = [dx/sq, dy/sq]
         H[1, idx:idx+2] = [-dy/q, dx/q]
 
-        # Innowacja
         y = np.array([[dist - z_pred_dist], [angle - z_pred_angle]])
         y[1, 0] = (y[1, 0] + math.pi) % (2 * math.pi) - math.pi
 
-        # Aktualizacja Kalmana
         S = H @ self.PEst @ H.T + self.R
         K = self.PEst @ H.T @ np.linalg.inv(S)
 

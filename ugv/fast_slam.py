@@ -4,17 +4,12 @@ import math
 import random
 from settings import *
 
-# ==========================================
-# 1. STRUKTURY DANYCH DLA CZĄSTECZEK
-# ==========================================
-
 
 class LandmarkMiniEKF:
     """Mały, niezależny EKF tylko dla JEDNEGO drzewa."""
 
     def __init__(self, mu_x, mu_y):
         self.mu = np.array([[mu_x], [mu_y]])
-        # Początkowa niepewność pozycji tego drzewa (tylko 2x2!)
         self.Sigma = np.eye(2) * 50.0
 
 
@@ -27,36 +22,26 @@ class Particle:
         self.theta = theta
         self.weight = 1.0
 
-        # Mapa dla tej konkretnej cząsteczki: id_drzewa -> obiekt LandmarkMiniEKF
         self.lm_dict = {}
-
-# ==========================================
-# 2. GŁÓWNY ALGORYTM FASTSLAM
-# ==========================================
 
 
 class FastSLAM:
     def __init__(self, start_x, start_y, num_particles=50):
         self.num_particles = num_particles
 
-        # Tworzymy chmurę cząsteczek. Na starcie wszystkie są w tym samym miejscu.
         self.particles = [Particle(start_x, start_y, 0.0)
                           for _ in range(num_particles)]
 
-        # Szumy
-        # Szum odometrii (std v, std w)
         self.Q = np.array([ROBOT_STD_V, math.radians(ROBOT_STD_W)])
         self.R = np.diag(
             [SENSOR_STD_DISTANCE, math.radians(SENSOR_STD_ANGLE)]) ** 2
 
-        # Zmienne dla main.py (żeby rysowanie działało bez zmian)
         self.xEst = np.zeros((3, 1))
         self.lm_dict = {}
 
     def predict(self, v, w, dt):
         """Krok 1: PREDYKCJA RUCHU (Odometria z szumem)"""
         for p in self.particles:
-            # Każdą cząsteczkę poruszamy trochę inaczej! Dodajemy szum do komend.
             noisy_v = v + random.gauss(0, self.Q[0])
             noisy_w = w + random.gauss(0, self.Q[1])
 
@@ -84,18 +69,15 @@ class FastSLAM:
 
     def _add_new_landmark(self, p, dist, angle, lm_id):
         """Inicjalizacja drzewa dla danej cząsteczki."""
-        # Skoro ufamy, że pozycja cząsteczki p jest idealna, to gdzie jest drzewo?
         lm_x = p.x + dist * math.cos(p.theta + angle)
         lm_y = p.y + dist * math.sin(p.theta + angle)
 
         p.lm_dict[lm_id] = LandmarkMiniEKF(lm_x, lm_y)
-        # Waga cząsteczki się nie zmienia przy nowym drzewie
 
     def _update_landmark(self, p, dist, angle, lm_id):
         """Aktualizacja Mini-EKF i zmiana wagi cząsteczki."""
         lm = p.lm_dict[lm_id]
 
-        # Oczekiwany pomiar (gdzie to drzewo powinno być z perspektywy tej cząsteczki)
         dx = lm.mu[0, 0] - p.x
         dy = lm.mu[1, 0] - p.y
         q = dx**2 + dy**2
@@ -108,7 +90,6 @@ class FastSLAM:
         z_pred_angle = math.atan2(dy, dx) - p.theta
         z_pred_angle = (z_pred_angle + math.pi) % (2 * math.pi) - math.pi
 
-        # Jakobian H względem MAPY (nie względem robota! Rozmiar 2x2)
         H = np.array([
             [dx/sq, dy/sq],
             [-dy/q, dx/q]
@@ -118,21 +99,17 @@ class FastSLAM:
         y = np.array([[dist - z_pred_dist], [angle - z_pred_angle]])
         y[1, 0] = (y[1, 0] + math.pi) % (2 * math.pi) - math.pi
 
-        # Równania Kalmana dla macierzy 2x2
         S = H @ lm.Sigma @ H.T + self.R
         K = lm.Sigma @ H.T @ np.linalg.inv(S)
 
         lm.mu = lm.mu + K @ y
         lm.Sigma = (np.eye(2) - K @ H) @ lm.Sigma
 
-        # OBLICZANIE WAGI
         detS = np.linalg.det(S)
         invS = np.linalg.inv(S)
 
-        # Obliczamy wykładnik jako skalar
         exponent = (-0.5 * y.T @ invS @ y).item()
 
-        # Prawdopodobieństwo Gaussa
         likelihood = math.exp(exponent) / math.sqrt((2 * math.pi)**2 * detS)
         p.weight *= likelihood
 
@@ -146,20 +123,16 @@ class FastSLAM:
                 p.weight = 1.0 / self.num_particles
             return
 
-        # Normalizacja wag
         weights = [w / sum_w for w in weights]
 
-        # Losowanie nowych cząsteczek na podstawie wag
         new_particles = []
         indices = np.random.choice(
             range(self.num_particles), size=self.num_particles, p=weights)
 
         for idx in indices:
             old_p = self.particles[idx]
-            # Klony muszą mieć nową pamięć, inaczej będą modyfikować te same obiekty!
             new_p = Particle(old_p.x, old_p.y, old_p.theta)
             for lm_id, lm in old_p.lm_dict.items():
-                # Kopiujemy macierze
                 new_lm = LandmarkMiniEKF(lm.mu[0, 0], lm.mu[1, 0])
                 new_lm.Sigma = lm.Sigma.copy()
                 new_p.lm_dict[lm_id] = new_lm

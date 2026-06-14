@@ -4,9 +4,6 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.optimize import least_squares
 
-# ==========================================
-# 1. PARAMETRY SIECI STACJI (TDoA / ToA)
-# ==========================================
 STATIONS = np.array([
     [3000.0, 3000.0, 50.0],
     [-3000.0, 3000.0, 10.0],
@@ -14,7 +11,6 @@ STATIONS = np.array([
     [3000.0, -3000.0, 5.0]
 ])
 
-# Zwiększamy szum, by wyraźnie pokazać jak bardzo EKF wygładza surowe namiary
 NOISE_STD_TDOA = 30.0
 
 
@@ -32,7 +28,6 @@ def prepare_ground_truth(gps_path):
     x, y, z = lon_lat_to_cartesian(
         gps['lon'], gps['lat'], gps['height'], lon0, lat0, alt0)
 
-    # Twarda podłoga
     z = np.maximum(z, 0.0)
 
     gps['x'], gps['y'], gps['z'] = x, y, z
@@ -55,10 +50,6 @@ def simulate_tdoa_measurements(ground_truth, outage_start, outage_end):
                 z_step.append(noisy_dist)
         measurements.append(z_step)
     return measurements
-
-# ==========================================
-# 2. ROZSZERZONY FILTR KALMANA (EKF)
-# ==========================================
 
 
 def run_ekf_tdoa(ground_truth, measurements):
@@ -85,7 +76,6 @@ def run_ekf_tdoa(ground_truth, measurements):
 
         P_ekf += np.eye(3) * Q_val * dt
 
-        # --- KROK 2: AKTUALIZACJA ---
         z_meas = measurements[step]
         for st_idx, st in enumerate(STATIONS):
             if np.isnan(z_meas[st_idx]):
@@ -111,28 +101,16 @@ def run_ekf_tdoa(ground_truth, measurements):
 
     return np.array(ekf_path)
 
-# ==========================================
-# 3. ZWYKŁA MULTILATERACJA (Metoda Najmniejszych Kwadratów)
-# ==========================================
-
 
 def run_multilateration(measurements):
-    """
-    Surowe wyliczanie pozycji z odległości.
-    Jeśli dostępnych jest mniej niż 3 stacji, funkcja nie może wyliczyć 3D i zwraca NaN.
-    """
     ml_path = []
-    guess = np.array([0.0, 0.0, 10.0])  # Początkowe "zgadywanie"
+    guess = np.array([0.0, 0.0, 10.0])
 
-    # Definiujemy granice: ( [min_X, min_Y, min_Z], [max_X, max_Y, max_Z] )
-    # X i Y mogą być od -nieskończoności do +nieskończoności.
-    # Z musi być >= 0 (Twarda podłoga)
     bounds = ([-np.inf, -np.inf, 0.0], [np.inf, np.inf, np.inf])
 
     for z_meas in measurements:
         valid_idx = ~np.isnan(z_meas)
 
-        # Jeśli mamy mniej niż 3 stacje (np. podczas awarii)
         if np.sum(valid_idx) < 3:
             ml_path.append([np.nan, np.nan, np.nan])
             continue
@@ -140,18 +118,13 @@ def run_multilateration(measurements):
         active_stations = STATIONS[valid_idx]
         active_dists = np.array(z_meas)[valid_idx]
 
-        # Funkcja błędu do minimalizacji
         def residual(p):
             return np.linalg.norm(active_stations - p, axis=1) - active_dists
 
-        # Szukanie optymalnego punktu przecinania się sfer (z uwzględnieniem granic!)
         res = least_squares(residual, guess, bounds=bounds)
 
         if res.success:
             ml_path.append(res.x)
-            # Lekkie zabezpieczenie - jeśli z jakiegoś powodu Z utknęło na 0,
-            # to podbijamy guess odrobinę do góry, żeby algorytm w kolejnym kroku
-            # nie "ślizgał się" po dolnej granicy, jeśli rakieta zacznie lecieć w górę.
             guess = res.x.copy()
             if guess[2] == 0.0:
                 guess[2] = 1.0
@@ -160,13 +133,13 @@ def run_multilateration(measurements):
 
     return np.array(ml_path)
 
-# ==========================================
-# 4. WIZUALIZACJA I PORÓWNANIE
-# ==========================================
-
 
 def plot_comparison_results(ground_truth, ekf_path, ml_path, outage_start, outage_end):
-    fig = plt.figure(figsize=(14, 10))
+    df_ml = pd.DataFrame(ml_path, columns=['x', 'y', 'z'])
+    df_ml_smooth = df_ml.rolling(window=10, min_periods=1).mean()
+    ml_smooth_path = df_ml_smooth.values
+
+    fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection='3d')
 
     ax.scatter(STATIONS[:, 0], STATIONS[:, 1], STATIONS[:, 2],
@@ -175,12 +148,14 @@ def plot_comparison_results(ground_truth, ekf_path, ml_path, outage_start, outag
     ax.plot(ground_truth['x'], ground_truth['y'], ground_truth['z'],
             color='green', linewidth=4, alpha=0.5, label='Prawdziwa Rakieta (Ground Truth)')
 
-    # Rysujemy surową multilaterację (kropki, żeby pokazać jak jest poszarpana i gdzie znika)
     ax.scatter(ml_path[:, 0], ml_path[:, 1], ml_path[:, 2],
-               color='gray', s=10, alpha=0.5, label='Surowa Multilateracja (Szum + Brak danych w awarii)')
+               color='gray', s=5, alpha=0.2, label='Surowa Multilateracja (Tło)')
+
+    ax.plot(ml_smooth_path[:, 0], ml_smooth_path[:, 1], ml_smooth_path[:, 2],
+            color='cyan', linestyle=':', linewidth=2, label='Multilateracja + Średnia Ruchoma (Okno 10)')
 
     ax.plot(ekf_path[:, 0], ekf_path[:, 1], ekf_path[:, 2],
-            color='red', linestyle='-', linewidth=2.5, label='EKF (Wygładzanie + Predykcja z Pitota)')
+            color='red', linestyle='-', linewidth=2.5, label='EKF (Wygładzanie + Pitot)')
 
     times = ground_truth['time_s'].values
     outage_mask = (times >= outage_start) & (times <= outage_end)
@@ -188,23 +163,50 @@ def plot_comparison_results(ground_truth, ekf_path, ml_path, outage_start, outag
         ax.plot(ekf_path[outage_mask, 0], ekf_path[outage_mask, 1], ekf_path[outage_mask, 2],
                 color='orange', linewidth=5, alpha=0.8, label='EKF w trakcie Awarii')
 
-    ax.set_title("Nawigacja: EKF vs Surowa Multilateracja", fontsize=16)
+    ax.set_title(
+        "Nawigacja Rakiety: EKF vs Uśredniona Multilateracja", fontsize=16)
     ax.set_xlabel('Oś X (Wschód) [m]')
     ax.set_ylabel('Oś Y (Północ) [m]')
     ax.set_zlabel('Wysokość Z [m]')
     ax.legend(loc='upper left', fontsize=11)
-
     ax.view_init(elev=20, azim=-45)
+    plt.tight_layout()
+
+    fig2, ax2 = plt.subplots(figsize=(12, 6))
+
+    gt_coords = ground_truth[['x', 'y', 'z']].values
+
+    err_ekf = np.sqrt(np.sum((ekf_path - gt_coords)**2, axis=1))
+
+    err_ml_smooth = np.sqrt(np.sum((ml_smooth_path - gt_coords)**2, axis=1))
+
+    ax2.plot(times, err_ml_smooth, color='magenta', alpha=0.8,
+             linestyle='--', linewidth=1.8, label='Błąd multilateracji z oknem 10')
+    ax2.plot(times, err_ekf, color='red',
+             linewidth=2.5, label='Błąd estymacji EKF')
+
+    if np.any(outage_mask):
+        ax2.plot(times[outage_mask], err_ekf[outage_mask], color='orange',
+                 linewidth=4, label='Błąd EKF podczas awarii (Tylko 2 stacje)')
+
+        ax2.axvline(outage_start, color='black', linestyle='--', alpha=0.5)
+        ax2.axvline(outage_end, color='black', linestyle='--', alpha=0.5)
+        ax2.text(outage_start + 1, np.nanmax(err_ml_smooth)*0.6, 'Okres awarii 2 stacji',
+                 fontsize=10, bbox=dict(facecolor='white', alpha=0.6))
+
+    ax2.set_title(
+        "Błąd euklidesowy pozycji 3D (Porównanie z Filtrem Cyfrowym)", fontsize=15)
+    ax2.set_xlabel("Czas lotu [s]", fontsize=12)
+    ax2.set_ylabel("Błąd bezwzględny odległości [m]", fontsize=12)
+    ax2.grid(True, linestyle='--', alpha=0.7)
+    ax2.legend(fontsize=11, loc='upper right')
+    plt.tight_layout()
+
     plt.show()
 
 
-# ==========================================
-# 5. GŁÓWNA PĘTLA
-# ==========================================
 if __name__ == "__main__":
     gps_filename = 'gps_data_synced.csv'
-
-    # Ustawiamy awarię w środku lotu (Dostosuj sekundy do swojego pliku csv!)
     OUTAGE_START = 30.0
     OUTAGE_END = 50.0
 
@@ -220,7 +222,7 @@ if __name__ == "__main__":
         print("Obliczanie EKF (z fuzją prędkości)...")
         ekf_path = run_ekf_tdoa(ground_truth, measurements)
 
-        print("Rysowanie wyników...")
+        print("Rysowanie wykresów...")
         plot_comparison_results(ground_truth, ekf_path,
                                 ml_path, OUTAGE_START, OUTAGE_END)
 
